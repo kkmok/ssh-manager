@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-SSH Manager - A simple SSH connection manager application
+SSH Manager - A secure SSH connection manager application
 Manage your SSH hosts, usernames, and keys with a beautiful UI
+Security features:
+- Sensitive data encryption
+- No API keys exposed
+- Secure local storage
 """
 
 import os
@@ -11,13 +15,14 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 from pathlib import Path
-import threading
 import subprocess
-import time
+from cryptography.fernet import Fernet
+import base64
 
 # Configuration
 CONFIG_DIR = Path.home() / ".ssh_manager"
 CONFIG_FILE = CONFIG_DIR / "hosts.json"
+KEY_FILE = CONFIG_DIR / "encryption.key"
 
 # Ensure config directory exists
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -33,8 +38,37 @@ st.markdown("""
     .host-online { color: #10b981; font-weight: bold; }
     .host-offline { color: #ef4444; font-weight: bold; }
     .ssh-key-icon { color: #f59e0b; }
+    .security-badge { background-color: #10b981; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8em; }
 </style>
 """, unsafe_allow_html=True)
+
+def get_encryption_key():
+    """Get or create encryption key"""
+    if KEY_FILE.exists():
+        with open(KEY_FILE, 'rb') as f:
+            return f.read()
+    else:
+        key = Fernet.generate_key()
+        with open(KEY_FILE, 'wb') as f:
+            f.write(key)
+        # Set restrictive permissions
+        os.chmod(KEY_FILE, 0o600)
+        return key
+
+def encrypt_data(data):
+    """Encrypt sensitive data"""
+    fernet = Fernet(get_encryption_key())
+    return base64.b64encode(fernet.encrypt(data.encode())).decode()
+
+def decrypt_data(encrypted_data):
+    """Decrypt sensitive data"""
+    if not encrypted_data:
+        return None
+    try:
+        fernet = Fernet(get_encryption_key())
+        return fernet.decrypt(base64.b64decode(encrypted_data)).decode()
+    except Exception:
+        return None
 
 def load_hosts():
     """Load SSH hosts from config file"""
@@ -44,9 +78,23 @@ def load_hosts():
     return []
 
 def save_hosts(hosts):
-    """Save SSH hosts to config file"""
+    """Save SSH hosts to config file with encryption"""
+    encrypted_hosts = []
+    for host in hosts:
+        encrypted_host = host.copy()
+        # Encrypt sensitive fields
+        if host.get('username'):
+            encrypted_host['username'] = encrypt_data(host['username'])
+        if host.get('host'):
+            encrypted_host['host'] = encrypt_data(host['host'])
+        if host.get('key_file'):
+            encrypted_host['key_file'] = encrypt_data(host['key_file'])
+        if host.get('password'):
+            encrypted_host['password'] = encrypt_data(host['password'])
+        encrypted_hosts.append(encrypted_host)
+    
     with open(CONFIG_FILE, 'w') as f:
-        json.dump(hosts, f, indent=2)
+        json.dump(encrypted_hosts, f, indent=2)
 
 def test_ssh_connection(host, username, key_file, timeout=5):
     """Test SSH connection to a host"""
@@ -54,11 +102,22 @@ def test_ssh_connection(host, username, key_file, timeout=5):
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
+        # Decrypt values if encrypted
+        if host.get('host'):
+            host_addr = decrypt_data(host['host']) or host['host']
+        else:
+            host_addr = host['host']
+            
+        if host.get('username'):
+            user = decrypt_data(host['username']) or host['username']
+        else:
+            user = host['username']
+        
         if key_file and os.path.exists(key_file):
             key = paramiko.RSAKey.from_private_key_file(key_file)
-            ssh.connect(host, username=username, pkey=key, timeout=timeout)
+            ssh.connect(host_addr, username=user, pkey=key, timeout=timeout)
         else:
-            ssh.connect(host, username=username, timeout=timeout)
+            ssh.connect(host_addr, username=user, timeout=timeout)
         
         ssh.close()
         return True
@@ -68,12 +127,23 @@ def test_ssh_connection(host, username, key_file, timeout=5):
 def ssh_connection(host, username, key_file=None, port=22):
     """Initiate SSH connection using system ssh command"""
     try:
-        if key_file and os.path.exists(key_file):
-            cmd = f"ssh -i {key_file} -p {port} {username}@{host}"
+        # Decrypt values if encrypted
+        if host.get('host'):
+            host_addr = decrypt_data(host['host']) or host['host']
         else:
-            cmd = f"ssh -p {port} {username}@{host}"
+            host_addr = host['host']
+            
+        if host.get('username'):
+            user = decrypt_data(host['username']) or host['username']
+        else:
+            user = host['username']
         
-        print(f"Connecting to {host} as {username}...")
+        if key_file and os.path.exists(key_file):
+            cmd = f"ssh -i {key_file} -p {port} {user}@{host_addr}"
+        else:
+            cmd = f"ssh -p {port} {user}@{host_addr}"
+        
+        print(f"Connecting to {host_addr} as {user}...")
         subprocess.run(cmd, shell=True)
         
     except Exception as e:
@@ -88,7 +158,8 @@ def delete_host(index):
 
 def main():
     st.title("🔑 SSH Manager")
-    st.markdown("## Manage your SSH connections with ease")
+    st.markdown("## Manage your SSH connections securely")
+    st.markdown('<span class="security-badge">🔒 Encrypted Storage</span>', unsafe_allow_html=True)
     
     # Sidebar
     st.sidebar.header("📊 Statistics")
@@ -105,22 +176,24 @@ def main():
         if not hosts:
             st.info("No hosts added yet. Click on 'Add Host' to add your first SSH connection!")
         else:
-            # Convert to DataFrame for better display
-            df = pd.DataFrame(hosts)
-            
             for idx, host in enumerate(hosts):
+                # Decrypt display values
+                name = host.get('name', f'Host {idx+1}')
+                display_host = decrypt_data(host.get('host', '')) or host.get('host', 'Unknown')
+                display_user = decrypt_data(host.get('username', '')) or host.get('username', 'Unknown')
+                
                 col1, col2, col3, col4 = st.columns([2, 1, 1, 0.5])
                 
                 with col1:
-                    st.markdown(f"### {host['name']}")
-                    st.write(f"🌐 {host['host']}")
-                    st.write(f"👤 {host['username']}")
+                    st.markdown(f"### {name}")
+                    st.write(f"🌐 {display_host}")
+                    st.write(f"👤 {display_user}")
                     if host.get('key_file'):
-                        st.write(f"🔑 {Path(host['key_file']).name}")
+                        st.write(f"🔑 {host['key_file']}")
                 
                 with col2:
                     if st.button("🔄 Test", key=f"test_{idx}"):
-                        is_online = test_ssh_connection(host['host'], host['username'], host.get('key_file'))
+                        is_online = test_ssh_connection(host, host.get('username'), host.get('key_file'))
                         if is_online:
                             st.success("✅ Host is online!")
                         else:
@@ -128,7 +201,7 @@ def main():
                 
                 with col3:
                     if st.button("🔌 Connect", key=f"connect_{idx}"):
-                        ssh_connection(host['host'], host['username'], host.get('key_file'), host.get('port', 22))
+                        ssh_connection(host, host.get('username'), host.get('key_file'), host.get('port', 22))
                 
                 with col4:
                     if st.button("🗑️", key=f"delete_{idx}"):
@@ -160,7 +233,7 @@ def main():
                 hosts.append(new_host)
                 save_hosts(hosts)
                 
-                st.success(f"✅ Host '{name}' saved successfully!")
+                st.success(f"✅ Host '{name}' saved securely!")
                 st.rerun()
             else:
                 st.error("Please fill in at least Name and Hostname")
@@ -175,15 +248,23 @@ def main():
                 st.success("All hosts cleared!")
                 st.rerun()
         
-        if st.button("🔧 Reset Configuration"):
-            if (CONFIG_FILE / "hosts.json").exists():
-                (CONFIG_FILE / "hosts.json").unlink()
-            st.success("Configuration reset!")
-            st.rerun()
+        if st.button("🔧 Regenerate Encryption Key"):
+            if st.checkbox("Confirm key regeneration (will require re-adding hosts)"):
+                if KEY_FILE.exists():
+                    KEY_FILE.unlink()
+                # Clear all hosts since they can't be decrypted
+                save_hosts([])
+                st.success("Encryption key regenerated! Please re-add your hosts.")
+                st.rerun()
         
-        st.subheader("About")
-        st.info("SSH Manager v1.0 - Manage your SSH connections with ease")
-        st.write("Created with Streamlit and Paramiko")
+        st.subheader("Security Information")
+        st.info("🛡️ **Security Features:**")
+        st.write("- 🔐 Sensitive data encrypted with Fernet")
+        st.write("- 🗂️ Keys stored in `~/.ssh_manager/`")
+        st.write("- 📝 No API keys exposed")
+        st.write("- 🛡️ Local-only storage")
+        
+        st.warning("⚠️ **Important:** Keep your encryption key safe! If lost, you'll need to re-add all hosts.")
 
 if __name__ == "__main__":
     main()

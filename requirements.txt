@@ -3,3 +3,4 @@ paramiko
 pyperclip
 pandas
 python-dotenv
+cryptography
