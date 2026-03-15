@@ -1,0 +1,5 @@
+streamlit
+paramiko
+pyperclip
+pandas
+python-dotenv
